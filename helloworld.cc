@@ -62,14 +62,14 @@ void initPoints() {
 
 void display() {
   // The variable to solve for with its initial value.
-  cv::Mat img(1100,1100, CV_32F);
+  cv::Mat img(1100,1100, CV_8UC3, cv::Scalar(40,40,80));
   for (int i = 0; i < kNumPoints; ++i) {
     Eigen::Vector3d vec = kXY[i] * 100;
     cv::rectangle( img, cv::Point( vec[0] - 3, vec[1] - 3 ), cv::Point( vec[0] + 3,vec[1] + 3), cv::Scalar( 255, 55, 255 ), CV_FILLED, 4 );
   }
   Eigen::Vector3d p1 = points[0] * 100;
 
-  cv::rectangle( img, cv::Point( p1[0] - 2, p1[1] - 2 ), cv::Point( p1[0] + 2, p1[1] + 2), cv::Scalar( 55, 55, 255 ), CV_FILLED, 4 );
+  cv::rectangle( img, cv::Point( p1[0] - 2, p1[1] - 2 ), cv::Point( p1[0] + 2, p1[1] + 2), cv::Scalar( 100, 200, 100 ), CV_FILLED, 4 );
   for (int i = 1; i < points.size(); ++i) {
     Eigen::Vector3d p1 = points[i - 1] * 100;
     Eigen::Vector3d p2 = points[i] * 100;
@@ -94,39 +94,68 @@ bool SolveWithFullReport(ceres::Solver::Options options,
   return summary.termination_type == ceres::CONVERGENCE;
 }
 
-struct MinDistanceCostFunctor {
-   MinDistanceCostFunctor(int i) :  
-     p0_(points[i - 1]),
-     p2_(points[i + 1]), 
+
+struct EqualDistanceCostFunctor {
+   EqualDistanceCostFunctor(int i) :  
      i_(i)
    {}
 
    template <typename T>
-   bool operator()(const T* const point1, T* residual) const {
+   bool operator()(const T* point0,const T* const point1, const T* const point2, T* residual) const {
+     Eigen::Map<const Eigen::Matrix<T, 3, 1> > p0(point0);
      Eigen::Map<const Eigen::Matrix<T, 3, 1> > p1(point1);
-     const Eigen::Matrix<T, 3, 1> u = p2_.cast<T>() - p1;
-     const Eigen::Matrix<T, 3, 1> distance = (p1 - p0_.cast<T>()).cross(u);
-     residual[0] = distance[2] * distance[2];
-     residual[1] = distance[2] * distance[2];
-     residual[2] = distance[2] * distance[2];
-     std::cout << "distance " << i_ << ": " << residual[0] << " " << residual[1] << " " << residual[2] << std::endl;
+     Eigen::Map<const Eigen::Matrix<T, 3, 1> > p2(point2);
+
+     const Eigen::Matrix<T, 3, 1> distance_vector = (p2 + p0) / 2. - p1; // p2_.cast<T>() - p1;
+     residual[0] = distance_vector[0];
+     residual[1] = distance_vector[1];
+     residual[2] = distance_vector[2];
+     // std::cout << "equald / distance " << i_ << ":" << std::endl << distance_vector << std::endl;
      return true;
    }
    int i_;
-   Eigen::Vector3d& p0_, p2_;
+};
+
+struct FollowTrajectoryCostFunctor {
+   FollowTrajectoryCostFunctor(int i, int j) :  
+     i_(i), j_(j)
+   {}
+
+   template <typename T>
+   bool operator()(const T* point,T* residual) const {
+      Eigen::Map<const Eigen::Matrix<T, 3, 1> > p(point);
+      T distance(0); //Eigen::Matrix<T, 3, 1> distance;
+      T d = (p - kXY[j_].cast<T>()).norm();
+      if (d > T(1e-6)) {
+        distance += d;
+      }
+      distance /= T(kNumPoints);
+      std::cout << " at i=" << i_ <<  " j=" << j_ << std::endl << distance << std::endl;
+      residual[0] = distance;
+      std::cout << "followt / distance " << i_ << ":" << std::endl << distance << std::endl;
+      return true;
+   }
+   int i_, j_;
 };
 
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
   // Problem configuration.
   initPoints();
-  ceres::Problem problem;
   display();
-  for (int n = 1; n < 3; ++n) {
-   for (int i = 1; i < points.size(); ++i) {
+  for (int n = 1; n < 10; ++n) {
+   ceres::Problem problem;
+   for (int i = 0; i < points.size(); ++i) {
     problem.AddParameterBlock(points[i].data(), 3);
-    problem.AddResidualBlock(new ceres::AutoDiffCostFunction<MinDistanceCostFunctor, 1, 3>(new MinDistanceCostFunctor(i)), nullptr, points[i].data());
+   }
+   for (int i = 1; i < points.size() - 1; ++i) {
+    problem.AddResidualBlock(new ceres::AutoDiffCostFunction<EqualDistanceCostFunctor, 3, 3, 3, 3>(new EqualDistanceCostFunctor(i)), nullptr, points[i - 1].data(), points[i].data(), points[i + 1].data());
+    for (int j = 0; j < kNumPoints; ++j) {
+      problem.AddResidualBlock(new ceres::AutoDiffCostFunction<FollowTrajectoryCostFunctor, 1, 3>(new FollowTrajectoryCostFunctor(i, j)), new ceres::HuberLoss(5), points[i].data());
+    }
    }	  
+   problem.SetParameterBlockConstant(points[0].data());
+   problem.SetParameterBlockConstant(points[points.size() - 1].data());
    ceres::Solver::Options options;
    options.max_num_iterations = 100;
    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
